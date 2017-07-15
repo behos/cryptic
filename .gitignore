@@ -1,2 +1,6 @@
 target/
 **/*.rs.bk
+Cargo.lock
+test_data/large.txt
+test_data/decrypted.txt
+test_data/encrypted.txt
