@@ -50,32 +50,69 @@ impl Iterator for BlockReader {
     }
 }
 
-pub fn encrypt(input: &str, output: &str, key: &str) {
-    let iv = generate_iv();
-    let input_file = File::open(input)
-        .expect("Could not open input file");
+trait Processor {
 
-    let output_file = File::create(output)
-        .expect("Could not open output file");
+    fn process(&self, input: &str, output: &str) {
+        let input_file = File::open(input)
+            .expect("Could not open input file");
 
-    let padded_key = key_with_padding(key.as_bytes());
-    let sealing_key = SealingKey::new(&AES_256_GCM, &padded_key)
-        .expect("Could not load encryption algorithm");
+        let output_file = File::create(output)
+            .expect("Could not open output file");
 
-    let reader = BlockReader::new(BufReader::new(input_file), BLOCK_SIZE);
-    let mut writer = BufWriter::new(output_file);
+        let mut reader = BufReader::new(input_file);
+        let mut writer = BufWriter::new(output_file);
+        let iv = self.process_iv(&mut reader, &mut writer);
+        let block_reader = BlockReader::new(reader, Self::get_block_size());
+        for block in block_reader {
+            let processed = self.process_block(block.to_vec(), &iv);
+            writer.write(&processed).expect("Error writing to file");
+        }
+    }
 
-    writer.write(&iv).expect("Error writing to file");
-    for block in reader {
-        encrypt_and_write_block(&mut writer, block.to_vec(), &sealing_key, &iv)
+    fn process_iv(
+        &self, reader: &mut BufReader<File>, writer: &mut BufWriter<File>
+    ) -> [u8; IV_SIZE];
+
+    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Vec<u8>;
+    fn get_block_size() -> usize;
+}
+
+struct Encryptor {
+    sealing_key: SealingKey
+}
+
+impl Encryptor {
+    fn new(key: &str) -> Self {
+        let padded_key = key_with_padding(key.as_bytes());
+        Self {
+            sealing_key: SealingKey::new(&AES_256_GCM, &padded_key)
+                .expect("Could not load encryption algorithm")
+        }
     }
 }
 
-fn generate_iv() -> [u8; IV_SIZE] {
-    let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
-    let mut rng = OsRng::new().ok().expect("Couldn't initialize rand");
-    rng.fill_bytes(&mut iv);
-    iv
+impl Processor for Encryptor {
+    fn process_iv(
+        &self, _: &mut BufReader<File>, writer: &mut BufWriter<File>
+    ) -> [u8; IV_SIZE] {
+        let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
+        let mut rng = OsRng::new().ok().expect("Couldn't initialize rand");
+        rng.fill_bytes(&mut iv);
+        writer.write(&iv).expect("Error when writing to file");
+        iv
+    }
+
+    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Vec<u8> {
+        let mut in_out = vec![0; block.len() + TAG_SIZE];
+        in_out[..block.len()].copy_from_slice(&block);
+        seal_in_place(&self.sealing_key, &iv, &[0; 0], &mut in_out, TAG_SIZE)
+            .expect("Error during encryption");
+        in_out
+    }
+
+    fn get_block_size() -> usize {
+        BLOCK_SIZE
+    }
 }
 
 fn key_with_padding(key: &[u8]) -> [u8; 32]
@@ -85,57 +122,46 @@ fn key_with_padding(key: &[u8]) -> [u8; 32]
     padded_key
 }
 
-fn encrypt_and_write_block(
-    writer: &mut Write, block: Vec<u8>, key: &SealingKey, iv: &[u8]
-) {
-    let encrypted = encrypt_block(block, &key, &iv);
-    writer.write(&encrypted).expect("Error writing to file");
+struct Decryptor {
+    opening_key: OpeningKey
 }
 
-fn encrypt_block(block: Vec<u8>, key: &SealingKey, iv: &[u8]) -> Vec<u8> {
-    let mut in_out = vec![0; block.len() + TAG_SIZE];
-    in_out[..block.len()].copy_from_slice(&block);
-    seal_in_place(&key, &iv, &[0; 0], &mut in_out, TAG_SIZE)
-        .expect("Error during encryption");
-    in_out
-}
-
-pub fn decrypt(input: &str, output: &str, key: &str) {
-    let input_file = File::open(input)
-        .expect("Could not open input file");
-
-    let output_file = File::create(output)
-        .expect("Could not open output file");
-
-    let padded_key = key_with_padding(key.as_bytes());
-    let opening_key = OpeningKey::new(&AES_256_GCM, &padded_key)
-        .expect("Could not load encryption algorithm");
-
-    let mut reader = BufReader::new(input_file);
-    let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
-    reader.read_exact(&mut iv).expect("Could not read from file");
-
-    let block_reader = BlockReader::new(reader, ENCRYPTED_BLOCK_SIZE);
-    let mut writer = BufWriter::new(output_file);
-
-    for block in block_reader {
-        decrypt_and_write_block(&mut writer, block.to_vec(), &opening_key, &iv)
+impl Decryptor {
+    fn new(key: &str) -> Self {
+        let padded_key = key_with_padding(key.as_bytes());
+        Self {
+            opening_key: OpeningKey::new(&AES_256_GCM, &padded_key)
+                .expect("Could not load encryption algorithm")
+        }
     }
 }
 
-fn decrypt_and_write_block(
-    writer: &mut Write, block: Vec<u8>, key: &OpeningKey, iv: &[u8]
-) {
-    let decrypted = decrypt_block(block, &key, &iv);
-    writer.write(&decrypted).expect("Error writing to file");
+impl Processor for Decryptor {
+    fn process_iv(
+        &self, reader: &mut BufReader<File>, _: &mut BufWriter<File>
+    ) -> [u8; IV_SIZE] {
+        let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
+        reader.read_exact(&mut iv).expect("Could not read from file");
+        iv
+    }
+
+    fn process_block(&self, mut block: Vec<u8>, iv: &[u8]) -> Vec<u8> {
+        open_in_place(&self.opening_key, &iv, &[0; 0], 0, &mut block)
+            .expect("Error during decryption").to_vec()
+    }
+
+    fn get_block_size() -> usize {
+        ENCRYPTED_BLOCK_SIZE
+    }
+
 }
 
+pub fn encrypt(input: &str, output: &str, key: &str) {
+    Encryptor::new(key).process(input, output);
+}
 
-fn decrypt_block(
-    mut block: Vec<u8>, key: &OpeningKey, iv: &[u8]
-) -> Vec<u8> {
-    open_in_place(&key, &iv, &[0; 0], 0, &mut block)
-        .expect("Error during decryption").to_vec()
+pub fn decrypt(input: &str, output: &str, key: &str) {
+    Decryptor::new(key).process(input, output);
 }
 
 #[cfg(test)]
