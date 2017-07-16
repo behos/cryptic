@@ -1,3 +1,4 @@
+use std::result::Result as StdResult;
 use std::fs::File;
 use std::io::{Read, Write, BufReader, BufWriter};
 use std::iter::Iterator;
@@ -9,12 +10,14 @@ use ring::aead::{
     AES_256_GCM
 };
 
+use errors::CrypticError;
 
 const IV_SIZE: usize = 12;
 const BLOCK_SIZE: usize = 100 * 1024;
 const TAG_SIZE: usize = 16;
 const ENCRYPTED_BLOCK_SIZE: usize = BLOCK_SIZE + TAG_SIZE;
 
+type Result<T> = StdResult<T, CrypticError>;
 
 struct BlockReader {
     reader: BufReader<File>,
@@ -52,28 +55,25 @@ impl Iterator for BlockReader {
 
 trait Processor {
 
-    fn process(&self, input: &str, output: &str) {
-        let input_file = File::open(input)
-            .expect("Could not open input file");
-
-        let output_file = File::create(output)
-            .expect("Could not open output file");
-
+    fn process(&self, input: &str, output: &str) -> Result<()> {
+        let input_file = File::open(input)?;
+        let output_file = File::create(output)?;
         let mut reader = BufReader::new(input_file);
         let mut writer = BufWriter::new(output_file);
-        let iv = self.process_iv(&mut reader, &mut writer);
+        let iv = self.process_iv(&mut reader, &mut writer)?;
         let block_reader = BlockReader::new(reader, Self::get_block_size());
         for block in block_reader {
-            let processed = self.process_block(block.to_vec(), &iv);
-            writer.write(&processed).expect("Error writing to file");
+            let processed = self.process_block(block.to_vec(), &iv)?;
+            writer.write(&processed)?;
         }
+        Ok(())
     }
 
     fn process_iv(
         &self, reader: &mut BufReader<File>, writer: &mut BufWriter<File>
-    ) -> [u8; IV_SIZE];
+    ) -> Result<[u8; IV_SIZE]>;
 
-    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Vec<u8>;
+    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Result<Vec<u8>>;
     fn get_block_size() -> usize;
 }
 
@@ -86,7 +86,7 @@ impl Encryptor {
         let padded_key = key_with_padding(key.as_bytes());
         Self {
             sealing_key: SealingKey::new(&AES_256_GCM, &padded_key)
-                .expect("Could not load encryption algorithm")
+                .expect("Failed initializing algorithm")
         }
     }
 }
@@ -94,20 +94,20 @@ impl Encryptor {
 impl Processor for Encryptor {
     fn process_iv(
         &self, _: &mut BufReader<File>, writer: &mut BufWriter<File>
-    ) -> [u8; IV_SIZE] {
+    ) -> Result<[u8; IV_SIZE]> {
         let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
         let mut rng = OsRng::new().ok().expect("Couldn't initialize rand");
         rng.fill_bytes(&mut iv);
-        writer.write(&iv).expect("Error when writing to file");
-        iv
+        writer.write(&iv)?;
+        Ok(iv)
     }
 
-    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Vec<u8> {
+    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Result<Vec<u8>> {
         let mut in_out = vec![0; block.len() + TAG_SIZE];
         in_out[..block.len()].copy_from_slice(&block);
         seal_in_place(&self.sealing_key, &iv, &[0; 0], &mut in_out, TAG_SIZE)
-            .expect("Error during encryption");
-        in_out
+            .expect("Unexpected error during encryption");
+        Ok(in_out)
     }
 
     fn get_block_size() -> usize {
@@ -131,7 +131,7 @@ impl Decryptor {
         let padded_key = key_with_padding(key.as_bytes());
         Self {
             opening_key: OpeningKey::new(&AES_256_GCM, &padded_key)
-                .expect("Could not load encryption algorithm")
+                .expect("Failed initializing algorithm")
         }
     }
 }
@@ -139,15 +139,17 @@ impl Decryptor {
 impl Processor for Decryptor {
     fn process_iv(
         &self, reader: &mut BufReader<File>, _: &mut BufWriter<File>
-    ) -> [u8; IV_SIZE] {
+    ) -> Result<[u8; IV_SIZE]> {
         let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
-        reader.read_exact(&mut iv).expect("Could not read from file");
-        iv
+        reader.read_exact(&mut iv)?;
+        Ok(iv)
     }
 
-    fn process_block(&self, mut block: Vec<u8>, iv: &[u8]) -> Vec<u8> {
-        open_in_place(&self.opening_key, &iv, &[0; 0], 0, &mut block)
-            .expect("Error during decryption").to_vec()
+    fn process_block(&self, mut block: Vec<u8>, iv: &[u8]) -> Result<Vec<u8>> {
+        let processed = open_in_place(
+            &self.opening_key, &iv, &[0; 0], 0, &mut block
+        )?;
+        Ok(processed.to_vec())
     }
 
     fn get_block_size() -> usize {
@@ -156,12 +158,12 @@ impl Processor for Decryptor {
 
 }
 
-pub fn encrypt(input: &str, output: &str, key: &str) {
-    Encryptor::new(key).process(input, output);
+pub fn encrypt(input: &str, output: &str, key: &str) -> Result<()> {
+    Encryptor::new(key).process(input, output)
 }
 
-pub fn decrypt(input: &str, output: &str, key: &str) {
-    Decryptor::new(key).process(input, output);
+pub fn decrypt(input: &str, output: &str, key: &str) -> Result<()> {
+    Decryptor::new(key).process(input, output)
 }
 
 #[cfg(test)]
@@ -192,8 +194,8 @@ mod test {
         let encrypted = get_test_file(ENCRYPTED);
         let decrypted = get_test_file(DECRYPTED);
         let password = "hellopassword".to_string();
-        encrypt(&initial, &encrypted, &password);
-        decrypt(&encrypted, &decrypted, &password);
+        encrypt(&initial, &encrypted, &password).ok();
+        decrypt(&encrypted, &decrypted, &password).ok();
 
         let mut initial_file = File::open(initial).unwrap();
         let mut decrypted_file = File::open(decrypted).unwrap();
@@ -206,7 +208,6 @@ mod test {
     }
 
     #[test]
-    #[should_panic]
     fn decrypt_fails_on_wrong_password() {
 
         let initial = get_test_file(INITIAL);
@@ -214,8 +215,9 @@ mod test {
         let decrypted = get_test_file(DECRYPTED);
         let password = "hellopassword".to_string();
         let wrong_password = "hellopasswords".to_string();
-        encrypt(&initial, &encrypted, &password);
-        decrypt(&encrypted, &decrypted, &wrong_password);
+        encrypt(&initial, &encrypted, &password).ok();
+        let res = decrypt(&encrypted, &decrypted, &wrong_password);
+        assert!(res.is_err())
     }
 
     #[test]
@@ -232,8 +234,8 @@ mod test {
         let encrypted = get_test_file(ENCRYPTED);
         let decrypted = get_test_file(DECRYPTED);
         let password = "hellopassword".to_string();
-        encrypt(&initial, &encrypted, &password);
-        decrypt(&encrypted, &decrypted, &password);
+        encrypt(&initial, &encrypted, &password).ok();
+        decrypt(&encrypted, &decrypted, &password).ok();
 
         let mut initial_file = File::open(initial).unwrap();
         let mut decrypted_file = File::open(decrypted).unwrap();
