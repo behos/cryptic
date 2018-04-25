@@ -1,15 +1,14 @@
 use std::convert::From;
 use std::error::Error;
+use std::fmt::{Display, Error as FmtError, Formatter};
 use std::io::Error as IOError;
-use std::fmt::{Display, Formatter, Error as FmtError};
 
 use ring::error::Unspecified;
-
 
 #[derive(Debug)]
 pub enum CrypticError {
     DecryptionError(String),
-    IOError(String)
+    IOError(String),
 }
 
 impl Display for CrypticError {
@@ -36,7 +35,7 @@ impl From<IOError> for CrypticError {
 impl From<Unspecified> for CrypticError {
     fn from(_: Unspecified) -> Self {
         CrypticError::DecryptionError(
-            "Failed decryption, possibly due to wrong password".to_string()
+            "Failed decryption, possibly due to wrong password".to_string(),
         )
     }
 }

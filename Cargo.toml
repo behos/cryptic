@@ -1,7 +1,11 @@
 [package]
 name = "cryptic"
+description = "A simple encryption/decryption application. You can use this to encrypt and decrypt files using a password"
 version = "0.1.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
+readme = "README.md"
+keywords = ["encryption", "cli"]
+license = "Apache-2.0"
 
 [dependencies]
 ring = "0.11.0"

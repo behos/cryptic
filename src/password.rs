@@ -1,7 +1,6 @@
 use rpassword::read_password;
-use std::io::stdout;
 use std::io::Write;
-
+use std::io::stdout;
 
 pub fn get_password(confirm: bool) -> String {
     let password = read_required_input("Please enter password");
