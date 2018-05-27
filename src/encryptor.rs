@@ -33,19 +33,22 @@ impl Iterator for BlockReader {
     type Item = Vec<u8>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        let mut block = Vec::with_capacity(self.block_size);
         let mut buffer = vec![0; self.block_size];
-        while block.len() < self.block_size {
-            let remaining = self.block_size - block.len();
-            if let Ok(fetched) = self.reader.read(&mut buffer[..remaining]) {
+        let mut filled = 0;
+        while filled < self.block_size {
+            if let Ok(fetched) = self.reader.read(&mut buffer[filled..]) {
                 if fetched == 0 {
-                    return if block.len() > 0 { Some(block) } else { None };
+                    return if filled > 0 {
+                        Some(buffer[..filled].to_vec())
+                    } else {
+                        None
+                    };
                 } else {
-                    block.extend_from_slice(&mut buffer[..fetched])
+                    filled += fetched
                 }
             }
         }
-        Some(block)
+        Some(buffer)
     }
 }
 
