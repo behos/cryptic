@@ -1,5 +1,3 @@
-#![feature(box_syntax)]
-
 extern crate clap;
 extern crate rand;
 extern crate ring;
