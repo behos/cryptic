@@ -14,7 +14,7 @@ pub fn get_password(confirm: bool) -> String {
 }
 
 fn read_required_input(prompt: &str) -> String {
-    let mut input = "".to_string();
+    let mut input = String::new();
     while input.len() == 0 {
         input = read_input(prompt)
     }
@@ -24,5 +24,5 @@ fn read_required_input(prompt: &str) -> String {
 fn read_input(prompt: &str) -> String {
     print!("{}: ", prompt);
     let _ = stdout().flush();
-    read_password().unwrap_or("".to_string())
+    read_password().unwrap_or(String::new())
 }

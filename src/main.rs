@@ -18,9 +18,9 @@ fn main() {
     let yaml_str = include_str!("cli.yml");
     let yaml = YamlLoader::load_from_str(yaml_str).expect("Failed to load argument config");
     let m = App::from_yaml(&yaml[0]).get_matches();
-    let (matches, command): (_, Box<Fn(&str, &str)>) = match m.subcommand() {
-        ("encrypt", Some(matches)) => (matches, box encrypt_subcommand),
-        ("decrypt", Some(matches)) => (matches, box decrypt_subcommand),
+    let (matches, command): (_, fn(&str, &str)) = match m.subcommand() {
+        ("encrypt", Some(matches)) => (matches, encrypt_subcommand),
+        ("decrypt", Some(matches)) => (matches, decrypt_subcommand),
         _ => panic!("Unrecognized command"),
     };
 
