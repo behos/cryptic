@@ -1,5 +1,5 @@
 name: Cryptic
-version: "0.1.0"
+version: "0.1.1"
 author: Giorgos Georgiou
 about: CLI for quick password encryption and decryption of files
 setting: SubcommandRequired
