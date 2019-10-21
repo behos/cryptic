@@ -1,14 +1,14 @@
 [package]
 name = "cryptic"
 description = "A simple encryption/decryption application. You can use this to encrypt and decrypt files using a password"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 readme = "README.md"
 keywords = ["encryption", "cli"]
 license = "Apache-2.0"
 
 [dependencies]
-ring = "0.11.0"
+ring = "0.13"
 rand = "0.3.15"
 rpassword = "0.4.0"
 yaml-rust = "0.3.5"
