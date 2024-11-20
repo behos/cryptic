@@ -1,28 +1,25 @@
-extern crate clap;
-extern crate rand;
-extern crate ring;
-extern crate rpassword;
-
 mod encryptor;
-mod errors;
 mod password;
 
+use anyhow::{Context, Result};
 use clap::{App, YamlLoader};
 
 use encryptor::{decrypt, encrypt};
 use password::get_password;
 
-fn main() {
+fn main() -> Result<()> {
     let yaml_str = include_str!("cli.yml");
-    let yaml = YamlLoader::load_from_str(yaml_str).expect("Failed to load argument config");
+    let yaml = YamlLoader::load_from_str(yaml_str).context("Failed to load argument config")?;
     let m = App::from_yaml(&yaml[0]).get_matches();
-    let (matches, command): (_, fn(&str, &str)) = match m.subcommand() {
-        ("encrypt", Some(matches)) => (matches, encrypt_subcommand),
-        ("decrypt", Some(matches)) => (matches, decrypt_subcommand),
+    let (matches, command): (_, fn(&str, &str) -> Result<()>) = match m.subcommand() {
+        Some(("encrypt", matches)) => (matches, encrypt_subcommand),
+        Some(("decrypt", matches)) => (matches, decrypt_subcommand),
         _ => panic!("Unrecognized command"),
     };
 
-    let input_file = matches.value_of("INPUT").expect("Missing input argument");
+    let input_file = matches
+        .value_of("INPUT")
+        .context("Missing input argument")?;
     let output_file = match matches.value_of("output") {
         Some(output_file) => output_file.to_string(),
         None => format!("{}.cpt", input_file),
@@ -31,16 +28,12 @@ fn main() {
     command(input_file, &output_file)
 }
 
-fn encrypt_subcommand(input_file: &str, output_file: &str) {
+fn encrypt_subcommand(input_file: &str, output_file: &str) -> Result<()> {
     let key = get_password(true);
-    if let Err(e) = encrypt(input_file, &output_file, &key) {
-        println!("An error occurred: {}", e)
-    }
+    encrypt(input_file, &output_file, &key)
 }
 
-fn decrypt_subcommand(input_file: &str, output_file: &str) {
+fn decrypt_subcommand(input_file: &str, output_file: &str) -> Result<()> {
     let key = get_password(false);
-    if let Err(e) = decrypt(input_file, &output_file, &key) {
-        println!("An error occurred: {}", e)
-    }
+    decrypt(input_file, &output_file, &key)
 }

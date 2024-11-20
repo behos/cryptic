@@ -1,19 +1,39 @@
-use std::fs::File;
-use std::io::{BufReader, BufWriter, Read, Write};
-use std::iter::Iterator;
-use std::result::Result as StdResult;
+use std::{
+    fs::File,
+    io::{BufReader, BufWriter, Read, Write},
+    iter::Iterator,
+    result::Result as StdResult,
+};
 
-use rand::{OsRng, Rng};
-use ring::aead::{open_in_place, seal_in_place, AES_256_GCM, OpeningKey, SealingKey};
-
-use errors::CrypticError;
+use anyhow::{anyhow, Context, Result};
+use rand::{random, rngs::OsRng, RngCore};
+use ring::{
+    aead::{
+        Aad as RingAad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, UnboundKey,
+        AES_256_GCM, NONCE_LEN,
+    },
+    error::Unspecified,
+};
 
 const IV_SIZE: usize = 12;
 const BLOCK_SIZE: usize = 100 * 1024;
 const TAG_SIZE: usize = 16;
 const ENCRYPTED_BLOCK_SIZE: usize = BLOCK_SIZE + TAG_SIZE;
 
-type Result<T> = StdResult<T, CrypticError>;
+type Aad = RingAad<[u8; IV_SIZE]>;
+
+struct NonceSequencer {}
+
+impl NonceSequence for NonceSequencer {
+    fn advance(&mut self) -> StdResult<Nonce, Unspecified> {
+        let rand = random::<u128>().to_le_bytes();
+        let mut nonce_array = [0; NONCE_LEN];
+        for (i, v) in rand[..12].iter().enumerate() {
+            nonce_array[i] = *v;
+        }
+        Ok(Nonce::assume_unique_for_key(nonce_array))
+    }
+}
 
 struct BlockReader {
     reader: BufReader<File>,
@@ -23,7 +43,7 @@ struct BlockReader {
 impl BlockReader {
     fn new(input_reader: BufReader<File>, block_size: usize) -> Self {
         Self {
-            block_size: block_size,
+            block_size,
             reader: input_reader,
         }
     }
@@ -53,67 +73,42 @@ impl Iterator for BlockReader {
 }
 
 trait Processor {
-    fn process(&self, input: &str, output: &str) -> Result<()> {
-        let input_file = File::open(input)?;
-        let output_file = File::create(output)?;
+    fn process(&mut self, input: &str, output: &str) -> Result<()> {
+        let input_file = File::open(input).context("failed to open input file")?;
+        let output_file = File::create(output).context("failed to open output file")?;
         let mut reader = BufReader::new(input_file);
         let mut writer = BufWriter::new(output_file);
-        let iv = self.process_iv(&mut reader, &mut writer)?;
+        let iv = self
+            .process_iv(&mut reader, &mut writer)
+            .context("failed to process iv")?;
         let block_reader = BlockReader::new(reader, Self::get_block_size());
         for block in block_reader {
-            let processed = self.process_block(block.to_vec(), &iv)?;
+            let processed = self
+                .process_block(block.to_vec(), &iv)
+                .context("failed to process block")?;
             writer.write(&processed)?;
         }
         Ok(())
     }
 
-    fn process_iv(
-        &self,
-        reader: &mut BufReader<File>,
-        writer: &mut BufWriter<File>,
-    ) -> Result<[u8; IV_SIZE]>;
+    fn process_iv(&self, reader: &mut BufReader<File>, writer: &mut BufWriter<File>)
+        -> Result<Aad>;
 
-    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Result<Vec<u8>>;
+    fn process_block(&mut self, block: Vec<u8>, iv: &Aad) -> Result<Vec<u8>>;
     fn get_block_size() -> usize;
 }
 
 struct Encryptor {
-    sealing_key: SealingKey,
+    sealing_key: SealingKey<NonceSequencer>,
 }
 
 impl Encryptor {
-    fn new(key: &str) -> Self {
-        let padded_key = key_with_padding(key.as_bytes());
-        Self {
-            sealing_key: SealingKey::new(&AES_256_GCM, &padded_key)
-                .expect("Failed initializing algorithm"),
-        }
-    }
-}
-
-impl Processor for Encryptor {
-    fn process_iv(
-        &self,
-        _: &mut BufReader<File>,
-        writer: &mut BufWriter<File>,
-    ) -> Result<[u8; IV_SIZE]> {
-        let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
-        let mut rng = OsRng::new().ok().expect("Couldn't initialize rand");
-        rng.fill_bytes(&mut iv);
-        writer.write(&iv)?;
-        Ok(iv)
-    }
-
-    fn process_block(&self, block: Vec<u8>, iv: &[u8]) -> Result<Vec<u8>> {
-        let mut in_out = vec![0; block.len() + TAG_SIZE];
-        in_out[..block.len()].copy_from_slice(&block);
-        seal_in_place(&self.sealing_key, &iv, &[0; 0], &mut in_out, TAG_SIZE)
-            .expect("Unexpected error during encryption");
-        Ok(in_out)
-    }
-
-    fn get_block_size() -> usize {
-        BLOCK_SIZE
+    fn new(key: &str) -> Result<Self> {
+        let key = key_with_padding(key.as_bytes());
+        let key =
+            UnboundKey::new(&AES_256_GCM, &key).map_err(|_| anyhow!("failed to create key"))?;
+        let sealing_key = SealingKey::new(key, NonceSequencer {});
+        Ok(Self { sealing_key })
     }
 }
 
@@ -123,33 +118,55 @@ fn key_with_padding(key: &[u8]) -> [u8; 32] {
     padded_key
 }
 
+impl Processor for Encryptor {
+    fn process_iv(&self, _: &mut BufReader<File>, writer: &mut BufWriter<File>) -> Result<Aad> {
+        let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
+        let mut rng = OsRng::default();
+        rng.fill_bytes(&mut iv);
+        writer.write(&iv).context("failed to write to file")?;
+        Ok(Aad::from(iv))
+    }
+
+    fn process_block(&mut self, block: Vec<u8>, iv: &Aad) -> Result<Vec<u8>> {
+        let mut in_out = vec![0; block.len() + TAG_SIZE];
+        in_out[..block.len()].copy_from_slice(&block);
+        self.sealing_key
+            .seal_in_place_append_tag(*iv, &mut in_out)
+            .map_err(|_| anyhow!("failed to seal in place"))?;
+        Ok(in_out)
+    }
+
+    fn get_block_size() -> usize {
+        BLOCK_SIZE
+    }
+}
+
 struct Decryptor {
-    opening_key: OpeningKey,
+    opening_key: OpeningKey<NonceSequencer>,
 }
 
 impl Decryptor {
-    fn new(key: &str) -> Self {
-        let padded_key = key_with_padding(key.as_bytes());
-        Self {
-            opening_key: OpeningKey::new(&AES_256_GCM, &padded_key)
-                .expect("Failed initializing algorithm"),
-        }
+    fn new(key: &str) -> Result<Self> {
+        let key = key_with_padding(key.as_bytes());
+        let key =
+            UnboundKey::new(&AES_256_GCM, &key).map_err(|_| anyhow!("failed to create key"))?;
+        let opening_key = OpeningKey::new(key, NonceSequencer {});
+        Ok(Self { opening_key })
     }
 }
 
 impl Processor for Decryptor {
-    fn process_iv(
-        &self,
-        reader: &mut BufReader<File>,
-        _: &mut BufWriter<File>,
-    ) -> Result<[u8; IV_SIZE]> {
+    fn process_iv(&self, reader: &mut BufReader<File>, _: &mut BufWriter<File>) -> Result<Aad> {
         let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
         reader.read_exact(&mut iv)?;
-        Ok(iv)
+        Ok(Aad::from(iv))
     }
 
-    fn process_block(&self, mut block: Vec<u8>, iv: &[u8]) -> Result<Vec<u8>> {
-        let processed = open_in_place(&self.opening_key, &iv, &[0; 0], 0, &mut block)?;
+    fn process_block(&mut self, mut block: Vec<u8>, iv: &Aad) -> Result<Vec<u8>> {
+        let processed = self
+            .opening_key
+            .open_in_place(*iv, &mut block)
+            .map_err(|_| anyhow!("failed to open in place"))?;
         Ok(processed.to_vec())
     }
 
@@ -159,11 +176,15 @@ impl Processor for Decryptor {
 }
 
 pub fn encrypt(input: &str, output: &str, key: &str) -> Result<()> {
-    Encryptor::new(key).process(input, output)
+    Encryptor::new(key)
+        .context("failed to create encryptor")?
+        .process(input, output)
 }
 
 pub fn decrypt(input: &str, output: &str, key: &str) -> Result<()> {
-    Decryptor::new(key).process(input, output)
+    Decryptor::new(key)
+        .context("failed to create decryptor")?
+        .process(input, output)
 }
 
 #[cfg(test)]
@@ -243,5 +264,4 @@ mod test {
         decrypted_file.read_to_string(&mut decrypted_content).ok();
         assert_eq!(initial_content, decrypted_content)
     }
-
 }
