@@ -1,8 +1,8 @@
 mod encryptor;
 mod password;
 
-use clap::Parser;
 use anyhow::Result;
+use clap::Parser;
 
 use encryptor::{decrypt, encrypt};
 use password::get_password;
