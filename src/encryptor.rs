@@ -6,7 +6,7 @@ use std::{
 };
 
 use anyhow::{anyhow, Context, Result};
-use rand::{random, rngs::OsRng, RngCore};
+use rand::{rngs::OsRng, RngCore};
 use ring::{
     aead::{
         Aad as RingAad, BoundKey, Nonce, NonceSequence, OpeningKey, SealingKey, UnboundKey,
@@ -15,23 +15,37 @@ use ring::{
     error::Unspecified,
 };
 
+const LEN_SIZE: usize = u32::BITS as usize / 8;
 const IV_SIZE: usize = 12;
 const BLOCK_SIZE: usize = 100 * 1024;
 const TAG_SIZE: usize = 16;
-const ENCRYPTED_BLOCK_SIZE: usize = BLOCK_SIZE + TAG_SIZE;
+const ENCRYPTED_BLOCK_SIZE: usize = LEN_SIZE + BLOCK_SIZE + TAG_SIZE;
 
 type Aad = RingAad<[u8; IV_SIZE]>;
 
-struct NonceSequencer {}
+struct NonceSequencer {
+    counter: u128,
+}
+
+impl NonceSequencer {
+    fn new(bytes: &[u8]) -> Self {
+        let mut padded_bytes = [0; 16];
+        for (i, b) in bytes.iter().take(16).enumerate() {
+            padded_bytes[i] = *b;
+        }
+        let counter = u128::from_le_bytes(padded_bytes);
+        Self { counter }
+    }
+}
 
 impl NonceSequence for NonceSequencer {
     fn advance(&mut self) -> StdResult<Nonce, Unspecified> {
-        let rand = random::<u128>().to_le_bytes();
+        self.counter += 1;
         let mut nonce_array = [0; NONCE_LEN];
-        for (i, v) in rand[..12].iter().enumerate() {
+        for (i, v) in self.counter.to_le_bytes()[..12].iter().enumerate() {
             nonce_array[i] = *v;
         }
-        Ok(Nonce::assume_unique_for_key(nonce_array))
+        Nonce::try_assume_unique_for_key(&nonce_array)
     }
 }
 
@@ -81,10 +95,10 @@ trait Processor {
         let iv = self
             .process_iv(&mut reader, &mut writer)
             .context("failed to process iv")?;
-        let block_reader = BlockReader::new(reader, Self::get_block_size());
-        for block in block_reader {
+        let block_reader = BlockReader::new(reader, Self::get_block_size() as usize);
+        for mut block in block_reader {
             let processed = self
-                .process_block(block.to_vec(), &iv)
+                .process_block(&mut block, &iv)
                 .context("failed to process block")?;
             writer.write(&processed)?;
         }
@@ -94,7 +108,7 @@ trait Processor {
     fn process_iv(&self, reader: &mut BufReader<File>, writer: &mut BufWriter<File>)
         -> Result<Aad>;
 
-    fn process_block(&mut self, block: Vec<u8>, iv: &Aad) -> Result<Vec<u8>>;
+    fn process_block(&mut self, block: &mut [u8], iv: &Aad) -> Result<Vec<u8>>;
     fn get_block_size() -> usize;
 }
 
@@ -104,10 +118,11 @@ struct Encryptor {
 
 impl Encryptor {
     fn new(key: &str) -> Result<Self> {
+        let nonce_seq = NonceSequencer::new(key.as_bytes());
         let key = key_with_padding(key.as_bytes());
         let key =
             UnboundKey::new(&AES_256_GCM, &key).map_err(|_| anyhow!("failed to create key"))?;
-        let sealing_key = SealingKey::new(key, NonceSequencer {});
+        let sealing_key = SealingKey::new(key, nonce_seq);
         Ok(Self { sealing_key })
     }
 }
@@ -127,9 +142,11 @@ impl Processor for Encryptor {
         Ok(Aad::from(iv))
     }
 
-    fn process_block(&mut self, block: Vec<u8>, iv: &Aad) -> Result<Vec<u8>> {
-        let mut in_out = vec![0; block.len() + TAG_SIZE];
-        in_out[..block.len()].copy_from_slice(&block);
+    fn process_block(&mut self, block: &mut [u8], iv: &Aad) -> Result<Vec<u8>> {
+        let mut in_out = vec![0; ENCRYPTED_BLOCK_SIZE - TAG_SIZE];
+        let block_len = (block.len() as u32).to_le_bytes();
+        in_out[..LEN_SIZE].copy_from_slice(&block_len);
+        in_out[LEN_SIZE..LEN_SIZE + block.len()].copy_from_slice(&block);
         self.sealing_key
             .seal_in_place_append_tag(*iv, &mut in_out)
             .map_err(|_| anyhow!("failed to seal in place"))?;
@@ -147,10 +164,11 @@ struct Decryptor {
 
 impl Decryptor {
     fn new(key: &str) -> Result<Self> {
+        let nonce_seq = NonceSequencer::new(key.as_bytes());
         let key = key_with_padding(key.as_bytes());
         let key =
             UnboundKey::new(&AES_256_GCM, &key).map_err(|_| anyhow!("failed to create key"))?;
-        let opening_key = OpeningKey::new(key, NonceSequencer {});
+        let opening_key = OpeningKey::new(key, nonce_seq);
         Ok(Self { opening_key })
     }
 }
@@ -162,12 +180,17 @@ impl Processor for Decryptor {
         Ok(Aad::from(iv))
     }
 
-    fn process_block(&mut self, mut block: Vec<u8>, iv: &Aad) -> Result<Vec<u8>> {
+    fn process_block(&mut self, mut block: &mut [u8], iv: &Aad) -> Result<Vec<u8>> {
         let processed = self
             .opening_key
             .open_in_place(*iv, &mut block)
             .map_err(|_| anyhow!("failed to open in place"))?;
-        Ok(processed.to_vec())
+        let mut block_len_bytes = [0; LEN_SIZE];
+        block_len_bytes.copy_from_slice(&processed[..LEN_SIZE]);
+        let block_len = u32::from_le_bytes(block_len_bytes) as usize;
+        let start = LEN_SIZE;
+        let end = start + block_len;
+        Ok(processed[start..end].to_vec())
     }
 
     fn get_block_size() -> usize {
@@ -194,12 +217,12 @@ mod test {
     use std::fs::File;
     use std::io::{Read, Write};
 
+    use tempfile::NamedTempFile;
+
     use super::{decrypt, encrypt, BLOCK_SIZE};
 
     const INITIAL: &'static str = "initial.txt";
     const LARGE: &'static str = "large.txt";
-    const ENCRYPTED: &'static str = "encrypted.txt";
-    const DECRYPTED: &'static str = "decrypted.txt";
 
     fn get_test_file(file_name: &str) -> String {
         let mut path = env::current_dir().unwrap();
@@ -211,30 +234,38 @@ mod test {
     #[test]
     fn can_encrypt_file() {
         let initial = get_test_file(INITIAL);
-        let encrypted = get_test_file(ENCRYPTED);
-        let decrypted = get_test_file(DECRYPTED);
+        let tmp_file = NamedTempFile::new().expect("failed to create tmpfile");
+        let encrypted = tmp_file.path().to_str().unwrap().to_string();
+        let tmp_file = NamedTempFile::new().expect("failed to create tmpfile");
+        let decrypted = tmp_file.path().to_str().unwrap().to_string();
         let password = "hellopassword".to_string();
-        encrypt(&initial, &encrypted, &password).ok();
-        decrypt(&encrypted, &decrypted, &password).ok();
+        encrypt(&initial, &encrypted, &password).expect("failed to encrypt");
+        decrypt(&encrypted, &decrypted, &password).expect("failed to decrypt");
 
         let mut initial_file = File::open(initial).unwrap();
         let mut decrypted_file = File::open(decrypted).unwrap();
 
         let mut initial_content = String::new();
         let mut decrypted_content = String::new();
-        initial_file.read_to_string(&mut initial_content).ok();
-        decrypted_file.read_to_string(&mut decrypted_content).ok();
+        initial_file
+            .read_to_string(&mut initial_content)
+            .expect("failed to read");
+        decrypted_file
+            .read_to_string(&mut decrypted_content)
+            .expect("failed to read");
         assert_eq!(initial_content, decrypted_content)
     }
 
     #[test]
     fn decrypt_fails_on_wrong_password() {
         let initial = get_test_file(INITIAL);
-        let encrypted = get_test_file(ENCRYPTED);
-        let decrypted = get_test_file(DECRYPTED);
+        let tmp_file = NamedTempFile::new().expect("failed to create tmpfile");
+        let encrypted = tmp_file.path().to_str().unwrap().to_string();
+        let tmp_file = NamedTempFile::new().expect("failed to create tmpfile");
+        let decrypted = tmp_file.path().to_str().unwrap().to_string();
         let password = "hellopassword".to_string();
         let wrong_password = "hellopasswords".to_string();
-        encrypt(&initial, &encrypted, &password).ok();
+        encrypt(&initial, &encrypted, &password).expect("failed to encrypt");
         let res = decrypt(&encrypted, &decrypted, &wrong_password);
         assert!(res.is_err())
     }
@@ -249,19 +280,25 @@ mod test {
         large_file.write_all(&block).ok();
 
         let initial = get_test_file(LARGE);
-        let encrypted = get_test_file(ENCRYPTED);
-        let decrypted = get_test_file(DECRYPTED);
+        let tmp_file = NamedTempFile::new().expect("failed to create tmpfile");
+        let encrypted = tmp_file.path().to_str().unwrap().to_string();
+        let tmp_file = NamedTempFile::new().expect("failed to create tmpfile");
+        let decrypted = tmp_file.path().to_str().unwrap().to_string();
         let password = "hellopassword".to_string();
-        encrypt(&initial, &encrypted, &password).ok();
-        decrypt(&encrypted, &decrypted, &password).ok();
+        encrypt(&initial, &encrypted, &password).expect("failed to encrypt");
+        decrypt(&encrypted, &decrypted, &password).expect("failed to decrypt");
 
         let mut initial_file = File::open(initial).unwrap();
         let mut decrypted_file = File::open(decrypted).unwrap();
 
         let mut initial_content = String::new();
         let mut decrypted_content = String::new();
-        initial_file.read_to_string(&mut initial_content).ok();
-        decrypted_file.read_to_string(&mut decrypted_content).ok();
+        initial_file
+            .read_to_string(&mut initial_content)
+            .expect("failed to read");
+        decrypted_file
+            .read_to_string(&mut decrypted_content)
+            .expect("failed to read");
         assert_eq!(initial_content, decrypted_content)
     }
 }

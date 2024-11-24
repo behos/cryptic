@@ -1,7 +1,7 @@
 [package]
 name = "cryptic"
 description = "A simple encryption/decryption application. You can use this to encrypt and decrypt files using a password"
-version = "0.1.1"
+version = "1.0.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 readme = "README.md"
 keywords = ["encryption", "cli"]
@@ -18,3 +18,6 @@ anyhow = "1.0.93"
 [dependencies.clap]
 version = "*"
 features = ["yaml", "suggestions", "color"]
+
+[dev-dependencies]
+tempfile = "3.14.0"
