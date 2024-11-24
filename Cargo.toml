@@ -9,15 +9,12 @@ license = "Apache-2.0"
 edition = "2021"
 
 [dependencies]
-ring = "*"
-rand = "*"
-rpassword = "*"
-yaml-rust = "*"
-anyhow = "1.0.93"
-
-[dependencies.clap]
-version = "*"
-features = ["yaml", "suggestions", "color"]
+ring = "0.13"
+rand = "0.4"
+rpassword = "0.4"
+yaml-rust = "0.3"
+anyhow = "1"
+clap = { version = "2", features = ["yaml", "suggestions", "color"] }
 
 [dev-dependencies]
-tempfile = "3.14.0"
+tempfile = "3"
