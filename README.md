@@ -1,5 +1,7 @@
 # Cryptic
 
+[![Rust](https://github.com/behos/cryptic/actions/workflows/rust.yml/badge.svg?branch=master)](https://github.com/behos/cryptic/actions/workflows/rust.yml)
+
 > [!CAUTION]
 > 1.0.0 is a breaking change and will not decrypt your existing files
 
