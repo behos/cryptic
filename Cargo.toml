@@ -1,18 +1,23 @@
 [package]
 name = "cryptic"
 description = "A simple encryption/decryption application. You can use this to encrypt and decrypt files using a password"
-version = "0.1.1"
+version = "1.0.0"
 authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 readme = "README.md"
 keywords = ["encryption", "cli"]
 license = "Apache-2.0"
+edition = "2021"
 
 [dependencies]
-ring = "0.13"
-rand = "0.3.15"
-rpassword = "0.4.0"
-yaml-rust = "0.3.5"
+ring = "*"
+rand = "*"
+rpassword = "*"
+yaml-rust = "*"
+anyhow = "1.0.93"
 
 [dependencies.clap]
-version = "2.25.0"
+version = "*"
 features = ["yaml", "suggestions", "color"]
+
+[dev-dependencies]
+tempfile = "3.14.0"
