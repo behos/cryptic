@@ -1,39 +1,56 @@
 mod encryptor;
 mod password;
 
-use anyhow::{Context, Result};
-use clap::{App, YamlLoader};
+use clap::Parser;
+use anyhow::Result;
 
 use encryptor::{decrypt, encrypt};
 use password::get_password;
 
+#[derive(Debug, Parser)]
+#[command(name = "cryptic")]
+#[command(about = "CLI for quick password encryption and decryption of files")]
+struct Cli {
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Parser)]
+enum Command {
+    #[command(arg_required_else_help = true)]
+    Encrypt {
+        #[arg(value_name = "INPUT")]
+        input: String,
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+    #[command(arg_required_else_help = true)]
+    Decrypt {
+        #[arg(value_name = "INPUT")]
+        input: String,
+        #[arg(short, long)]
+        output: Option<String>,
+    },
+}
+
 fn main() -> Result<()> {
-    let yaml_str = include_str!("cli.yml");
-    let yaml = YamlLoader::load_from_str(yaml_str).context("Failed to load argument config")?;
-    let m = App::from_yaml(&yaml[0]).get_matches();
-    let (matches, command): (_, fn(&str, &str) -> Result<()>) = match m.subcommand() {
-        Some(("encrypt", matches)) => (matches, encrypt_subcommand),
-        Some(("decrypt", matches)) => (matches, decrypt_subcommand),
-        _ => panic!("Unrecognized command"),
-    };
-
-    let input_file = matches
-        .value_of("INPUT")
-        .context("Missing input argument")?;
-    let output_file = match matches.value_of("output") {
-        Some(output_file) => output_file.to_string(),
-        None => format!("{}.cpt", input_file),
-    };
-
-    command(input_file, &output_file)
+    let args = Cli::parse();
+    match args.command {
+        Command::Encrypt { input, output } => {
+            encrypt_subcommand(&input, &output.unwrap_or_else(|| input.clone() + ".cpt"))
+        }
+        Command::Decrypt { input, output } => {
+            decrypt_subcommand(&input, &output.unwrap_or_else(|| input.clone() + ".cpt"))
+        }
+    }
 }
 
 fn encrypt_subcommand(input_file: &str, output_file: &str) -> Result<()> {
     let key = get_password(true);
-    encrypt(input_file, &output_file, &key)
+    encrypt(input_file, output_file, &key)
 }
 
 fn decrypt_subcommand(input_file: &str, output_file: &str) -> Result<()> {
     let key = get_password(false);
-    decrypt(input_file, &output_file, &key)
+    decrypt(input_file, output_file, &key)
 }

@@ -95,12 +95,12 @@ trait Processor {
         let iv = self
             .process_iv(&mut reader, &mut writer)
             .context("failed to process iv")?;
-        let block_reader = BlockReader::new(reader, Self::get_block_size() as usize);
+        let block_reader = BlockReader::new(reader, Self::get_block_size());
         for mut block in block_reader {
             let processed = self
                 .process_block(&mut block, &iv)
                 .context("failed to process block")?;
-            writer.write(&processed)?;
+            writer.write_all(&processed)?;
         }
         Ok(())
     }
@@ -136,8 +136,7 @@ fn key_with_padding(key: &[u8]) -> [u8; 32] {
 impl Processor for Encryptor {
     fn process_iv(&self, _: &mut BufReader<File>, writer: &mut BufWriter<File>) -> Result<Aad> {
         let mut iv: [u8; IV_SIZE] = [0; IV_SIZE];
-        let mut rng = OsRng::default();
-        rng.fill_bytes(&mut iv);
+        OsRng.fill_bytes(&mut iv);
         writer.write(&iv).context("failed to write to file")?;
         Ok(Aad::from(iv))
     }
@@ -146,7 +145,7 @@ impl Processor for Encryptor {
         let mut in_out = vec![0; ENCRYPTED_BLOCK_SIZE - TAG_SIZE];
         let block_len = (block.len() as u32).to_le_bytes();
         in_out[..LEN_SIZE].copy_from_slice(&block_len);
-        in_out[LEN_SIZE..LEN_SIZE + block.len()].copy_from_slice(&block);
+        in_out[LEN_SIZE..LEN_SIZE + block.len()].copy_from_slice(block);
         self.sealing_key
             .seal_in_place_append_tag(*iv, &mut in_out)
             .map_err(|_| anyhow!("failed to seal in place"))?;
@@ -180,10 +179,10 @@ impl Processor for Decryptor {
         Ok(Aad::from(iv))
     }
 
-    fn process_block(&mut self, mut block: &mut [u8], iv: &Aad) -> Result<Vec<u8>> {
+    fn process_block(&mut self, block: &mut [u8], iv: &Aad) -> Result<Vec<u8>> {
         let processed = self
             .opening_key
-            .open_in_place(*iv, &mut block)
+            .open_in_place(*iv, block)
             .map_err(|_| anyhow!("failed to open in place"))?;
         let mut block_len_bytes = [0; LEN_SIZE];
         block_len_bytes.copy_from_slice(&processed[..LEN_SIZE]);
@@ -221,8 +220,8 @@ mod test {
 
     use super::{decrypt, encrypt, BLOCK_SIZE};
 
-    const INITIAL: &'static str = "initial.txt";
-    const LARGE: &'static str = "large.txt";
+    const INITIAL: &str = "initial.txt";
+    const LARGE: &str = "large.txt";
 
     fn get_test_file(file_name: &str) -> String {
         let mut path = env::current_dir().unwrap();
