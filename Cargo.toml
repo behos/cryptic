@@ -6,7 +6,7 @@ authors = ["Giorgos Georgiou <giorgos.georgiou@outlook.com>"]
 readme = "README.md"
 keywords = ["encryption", "cli"]
 license = "Apache-2.0"
-edition = "2021"
+edition = "2024"
 
 [dependencies]
 ring = "0.17"
